@@ -6,6 +6,7 @@ import AppDataSource from "../config/Datasource";
 import logger from "../config/logger";
 import { DeploymentEventBridge, TransactionEventBridge } from "../Gateway/eventBridges";
 import { JobHandler, JobHandlerResult, NonRetryableJobError } from "./jobWorker";
+import { QueueJob } from "./job.entity";
 import { getFinalizationManager } from "../services/finality/FinalizationManager";
 import { SafeXdrDecoder } from "../utils/xdr";
 
@@ -28,6 +29,10 @@ interface FundingAutoDeployPayload {
   transactionHash: string;
   amount: string;
   stellarAccount: string;
+}
+
+interface WorkflowExpiryPayload {
+  batchSize?: number;
 }
 
 class DelayedTransactionJobHandler implements JobHandler {
@@ -233,9 +238,54 @@ class FundingAutoDeploymentJobHandler implements JobHandler {
   }
 }
 
+class WorkflowExpiryJobHandler implements JobHandler {
+  readonly jobType = "workflow.expire_cleanup";
+  private readonly defaultBatchSize = 100;
+
+  async handle(job: QueueJob): Promise<JobHandlerResult> {
+    const payload = job.payload as unknown as WorkflowExpiryPayload;
+    const batchSize = payload?.batchSize ?? this.defaultBatchSize;
+
+    try {
+      // Lazy import to avoid circular dependency
+      const { adminWorkflowService } = await import("../Agents/admin/workflow.service");
+      const expiredCount = await adminWorkflowService.expireOldInstances();
+      
+      logger.info("Workflow expiry cleanup completed", {
+        jobId: job.id,
+        expiredCount,
+        batchSize,
+      });
+
+      return {
+        outcome: "completed",
+        result: {
+          expiredCount,
+          processedAt: new Date().toISOString(),
+        },
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Unknown workflow expiry error";
+      
+      logger.error("Workflow expiry cleanup failed", {
+        jobId: job.id,
+        error: errorMessage,
+      });
+
+      return {
+        outcome: "retry",
+        delayMs: 60000, // Retry after 1 minute
+        error: errorMessage,
+      };
+    }
+  }
+}
+
 export function buildDefaultJobHandlers(): JobHandler[] {
   return [
     new DelayedTransactionJobHandler(),
     new FundingAutoDeploymentJobHandler(),
+    new WorkflowExpiryJobHandler(),
   ];
 }

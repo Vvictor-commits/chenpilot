@@ -78,6 +78,9 @@ export class DurableExecution {
   @Column({ type: "uuid", nullable: true })
   approvedBy?: string;
 
+  @Column({ type: "timestamp", nullable: true })
+  expiresAt?: Date;
+
   @Column({ type: "integer", default: 1 })
   currentStepNumber!: number;
 

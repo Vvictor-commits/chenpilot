@@ -129,11 +129,15 @@ export class DurableExecutor {
 
     if (execution.requiresApproval) {
       execution.status = ExecutionStatus.AWAITING_APPROVAL;
+      const ttlMinutes = plan.approvalTimeoutMinutes || 60; // Default 60 minutes
+      const now = new Date();
+      execution.expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000);
       await this.executionRepo.save(execution);
       this.emitUpdate(RealtimeEventType.AGENT_APPROVAL_REQUIRED, execution);
       logger.info("Durable execution awaiting plan-level approval", {
         executionId: execution.id,
         parallel: useParallel,
+        expiresAt: execution.expiresAt,
       });
       return savedExecution;
     }
@@ -366,15 +370,22 @@ export class DurableExecutor {
 
         if (step.requiresApproval && !step.approvedAt) {
           step.status = StepStatus.AWAITING_APPROVAL;
+          const ttlMinutes = 60; // Default 60 minutes for step approval
+          const now = new Date();
+          step.expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000);
           await this.stepRepo.save(step);
 
           execution.status = ExecutionStatus.AWAITING_APPROVAL;
+          if (!execution.expiresAt) {
+            execution.expiresAt = step.expiresAt;
+          }
           await this.executionRepo.save(execution);
 
           this.emitUpdate(RealtimeEventType.AGENT_APPROVAL_REQUIRED, execution);
           logger.info("Execution suspended for step approval", {
             executionId,
             stepNumber: step.stepNumber,
+            expiresAt: step.expiresAt,
           });
           return;
         }
