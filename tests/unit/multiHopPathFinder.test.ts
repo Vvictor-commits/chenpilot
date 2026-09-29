@@ -381,4 +381,106 @@ describe("MultiHopPathFinder", () => {
       expect(pathFinder.comparePaths(direct, indirect)).toBe(direct);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Cyclic route rejection
+  // ---------------------------------------------------------------------------
+
+  describe("cyclic route rejection", () => {
+    beforeEach(() => {
+      // Make Asset constructor and native() return objects with working
+      // getCode/getIssuer/isNative so poolKey() produces distinguishable strings.
+      (StellarSdk.Asset as unknown as jest.Mock).mockImplementation(
+        (code: string, issuer: string) => ({
+          isNative: () => false,
+          getCode: () => code,
+          getIssuer: () => issuer,
+        })
+      );
+      (StellarSdk.Asset.native as jest.Mock).mockReturnValue({
+        isNative: () => true,
+        getCode: () => "XLM",
+        getIssuer: () => "",
+      });
+      // Re-create pathFinder so it uses the fresh server mock with these asset mocks active
+      pathFinder = new MultiHopPathFinder();
+    });
+
+    it("drops a path where the same asset-pair pool is used twice", async () => {
+      const xlm = StellarSdk.Asset.native();
+      const usdc = new StellarSdk.Asset("USDC", "GABC");
+
+      // XLM → USDT → XLM → USDC: XLM/USDT pool used at hop 1 and hop 2 → cycle
+      mockServer.call
+        .mockResolvedValueOnce({
+          records: [
+            {
+              source_amount: "100.0000000",
+              destination_amount: "12.0000000",
+              path: [
+                { asset_type: "credit_alphanum4", asset_code: "USDT", asset_issuer: "GDEF" },
+                { asset_type: "native" },
+              ],
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ records: [] });
+
+      await expect(
+        pathFinder.findOptimalPath(xlm, usdc, "100", {
+          policy: { minEfficiency: 0, maxSlippage: 1, maxHops: 10 },
+        })
+      ).rejects.toThrow("No valid trading paths found");
+    });
+
+    it("accepts a non-cyclic multi-hop path through distinct pools", async () => {
+      const xlm = StellarSdk.Asset.native();
+      const usdc = new StellarSdk.Asset("USDC", "GABC");
+
+      // XLM → USDT → USDC: XLM/USDT pool then USDT/USDC pool — no cycle
+      mockServer.call
+        .mockResolvedValueOnce({
+          records: [makeRecord("12.0000000", [
+            { asset_type: "credit_alphanum4", asset_code: "USDT", asset_issuer: "GDEF" },
+          ])],
+        })
+        .mockResolvedValueOnce({ records: [] });
+
+      const result = await pathFinder.findOptimalPath(xlm, usdc, "100", {
+        policy: { minEfficiency: 0, maxSlippage: 1, maxHops: 10 },
+      });
+
+      expect(result.allPaths).toHaveLength(1);
+    });
+
+    it("keeps clean paths and drops cyclic ones when both are returned", async () => {
+      const xlm = StellarSdk.Asset.native();
+      const usdc = new StellarSdk.Asset("USDC", "GABC");
+
+      // Clean: XLM → USDC direct (dest 12)
+      // Cyclic: XLM → USDT → XLM → USDC (dest 15, higher but cyclic — must be dropped)
+      mockServer.call
+        .mockResolvedValueOnce({
+          records: [
+            makeRecord("12.0000000"),
+            {
+              source_amount: "100.0000000",
+              destination_amount: "15.0000000",
+              path: [
+                { asset_type: "credit_alphanum4", asset_code: "USDT", asset_issuer: "GDEF" },
+                { asset_type: "native" },
+              ],
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ records: [] });
+
+      const result = await pathFinder.findOptimalPath(xlm, usdc, "100", {
+        policy: { minEfficiency: 0, maxSlippage: 1, maxHops: 10 },
+      });
+
+      expect(result.allPaths).toHaveLength(1);
+      expect(parseFloat(result.bestPath.destinationAmount)).toBe(12.0);
+    });
+  });
 });
