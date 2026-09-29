@@ -141,6 +141,7 @@ function makeExecution(
     cancelledAt: null,
     cancelledBy: null,
     cancellationReason: null,
+    schemaVersion: "1.0.0",
     ...overrides,
   };
 }
@@ -661,6 +662,63 @@ describe("DurableExecutor — cancellation semantics", () => {
       await expect(
         executor.resumeExecution("exec-1", "approver-1")
       ).rejects.toThrow("Cannot resume a cancelled execution");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Schema version compatibility check
+  //
+  // Scenario: resumeExecution should reject executions with incompatible
+  // schema versions to prevent corruption from structural changes.
+  // -------------------------------------------------------------------------
+
+  describe("Schema version compatibility", () => {
+    it("rejects resume when schema version is missing (legacy execution)", async () => {
+      const exec = makeExecution({
+        status: ExecutionStatus.RUNNING,
+        schemaVersion: undefined,
+      });
+      executionRepo.findOne.mockResolvedValue(exec);
+
+      await expect(
+        executor.resumeExecution("exec-1")
+      ).rejects.toThrow("missing schema version");
+    });
+
+    it("rejects resume when schema version is below minimum", async () => {
+      const exec = makeExecution({
+        status: ExecutionStatus.RUNNING,
+        schemaVersion: "0.0.1",
+      });
+      executionRepo.findOne.mockResolvedValue(exec);
+
+      await expect(
+        executor.resumeExecution("exec-1")
+      ).rejects.toThrow("incompatible workflow schema version");
+    });
+
+    it("rejects resume when schema version is newer than current", async () => {
+      const exec = makeExecution({
+        status: ExecutionStatus.RUNNING,
+        schemaVersion: "99.0.0",
+      });
+      executionRepo.findOne.mockResolvedValue(exec);
+
+      await expect(
+        executor.resumeExecution("exec-1")
+      ).rejects.toThrow("incompatible workflow schema version");
+    });
+
+    it("allows resume when schema version matches current", async () => {
+      const exec = makeExecution({
+        status: ExecutionStatus.RUNNING,
+        schemaVersion: "1.0.0",
+      });
+      executionRepo.findOne.mockResolvedValue(exec);
+      executionRepo.save.mockImplementation(async (e: unknown) => e);
+
+      // Should not throw
+      await executor.resumeExecution("exec-1");
     });
   });
 });

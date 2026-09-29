@@ -15,6 +15,10 @@ import {
 } from "../../Gateway/socketManager";
 import { compensationService, buildCompensationPlan } from "./CompensationService";
 import { FailureState } from "../types";
+import {
+  CURRENT_WORKFLOW_SCHEMA_VERSION,
+  checkSchemaCompatibility,
+} from "./workflowSchemaVersion";
 
 export interface DurableExecutionResult {
   executionId: string;
@@ -104,6 +108,7 @@ export class DurableExecutor {
     execution.currentStepNumber = 1;
     execution.riskLevel = plan.riskLevel;
     execution.requiresApproval = plan.requiresApproval;
+    execution.schemaVersion = CURRENT_WORKFLOW_SCHEMA_VERSION;
 
     execution.steps = plan.steps.map((step) => {
       const durableStep = new DurableStep();
@@ -176,6 +181,33 @@ export class DurableExecutor {
     });
 
     if (!execution) throw new Error("Execution not found");
+
+    // Check schema version compatibility before attempting resume
+    // Handle legacy executions without schemaVersion field
+    if (!execution.schemaVersion) {
+      logger.error("Resume rejected due to missing schema version (legacy execution)", {
+        executionId,
+      });
+      throw new Error(
+        `Cannot resume execution: missing schema version. This execution was created before schema versioning was introduced and cannot be safely resumed.`
+      );
+    }
+
+    const compatibility = checkSchemaCompatibility(execution.schemaVersion);
+    if (!compatibility.compatible) {
+      logger.error("Resume rejected due to incompatible workflow schema version", {
+        executionId,
+        storedVersion: execution.schemaVersion,
+        currentVersion: compatibility.currentVersion,
+        reason: compatibility.reason,
+      });
+      throw new Error(
+        `Cannot resume execution: incompatible workflow schema version. ` +
+        `Stored: ${execution.schemaVersion}, Current: ${compatibility.currentVersion}. ` +
+        `Reason: ${compatibility.reason}`
+      );
+    }
+
     if (execution.status === ExecutionStatus.COMPLETED) return;
     if (execution.status === ExecutionStatus.CANCELLED) {
       throw new Error("Cannot resume a cancelled execution");
