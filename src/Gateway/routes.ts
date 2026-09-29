@@ -25,6 +25,7 @@ import governanceRoutes from "../Agents/admin/governance.routes";
 import experimentRoutes from "../Agents/admin/experiment.routes";
 import simulationRoutes from "../Agents/admin/simulation.routes";
 import workflowRoutes from "../Agents/admin/workflow.routes";
+import progressMonitorRoutes from "../Agents/planner/progressMonitor.routes";
 import { stellarLiquidityTool } from "../Agents/tools/stellarLiquidityTool";
 import { authenticateToken } from "../Auth/auth.middleware";
 import { validateBody, validateQuery } from "./middleware/validation";
@@ -96,6 +97,9 @@ router.use("/admin/simulation", simulationRoutes);
 
 // Mount workflow routes (requires admin role)
 router.use("/admin/workflows", workflowRoutes);
+
+// Mount progress monitor routes (requires admin role)
+router.use("/planner/progress", progressMonitorRoutes);
 router.get(
   "/admin/operator-report",
   authenticateToken,

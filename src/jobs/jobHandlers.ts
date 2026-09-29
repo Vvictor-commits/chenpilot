@@ -35,6 +35,10 @@ interface WorkflowExpiryPayload {
   batchSize?: number;
 }
 
+interface ProgressMonitorPayload {
+  logOnly?: boolean;
+}
+
 class DelayedTransactionJobHandler implements JobHandler {
   readonly jobType = "delayed_transaction.submit";
   private readonly server = new StellarSdk.Horizon.Server(config.stellar.horizonUrl);
@@ -250,7 +254,7 @@ class WorkflowExpiryJobHandler implements JobHandler {
       // Lazy import to avoid circular dependency
       const { adminWorkflowService } = await import("../Agents/admin/workflow.service");
       const expiredCount = await adminWorkflowService.expireOldInstances();
-      
+
       logger.info("Workflow expiry cleanup completed", {
         jobId: job.id,
         expiredCount,
@@ -267,7 +271,7 @@ class WorkflowExpiryJobHandler implements JobHandler {
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Unknown workflow expiry error";
-      
+
       logger.error("Workflow expiry cleanup failed", {
         jobId: job.id,
         error: errorMessage,
@@ -282,10 +286,71 @@ class WorkflowExpiryJobHandler implements JobHandler {
   }
 }
 
+class ProgressMonitorJobHandler implements JobHandler {
+  readonly jobType = "progress.monitor";
+
+  async handle(job: QueueJob): Promise<JobHandlerResult> {
+    const payload = job.payload as unknown as ProgressMonitorPayload;
+    const logOnly = payload?.logOnly ?? true;
+
+    try {
+      // Lazy import to avoid circular dependency
+      const { progressMonitorService } = await import("../Agents/planner/ProgressMonitor.service");
+
+      if (logOnly) {
+        await progressMonitorService.logStuckExecutions();
+      } else {
+        const healthStats = await progressMonitorService.getExecutionHealthStats();
+
+        logger.info("Progress monitor health check completed", {
+          jobId: job.id,
+          stats: {
+            total: healthStats.total,
+            running: healthStats.running,
+            awaitingApproval: healthStats.awaitingApproval,
+            paused: healthStats.paused,
+            stuck: healthStats.stuck,
+          },
+        });
+
+        return {
+          outcome: "completed",
+          result: {
+            healthStats,
+            processedAt: new Date().toISOString(),
+          },
+        };
+      }
+
+      return {
+        outcome: "completed",
+        result: {
+          processedAt: new Date().toISOString(),
+        },
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Unknown progress monitor error";
+
+      logger.error("Progress monitor failed", {
+        jobId: job.id,
+        error: errorMessage,
+      });
+
+      return {
+        outcome: "retry",
+        delayMs: 300000, // Retry after 5 minutes
+        error: errorMessage,
+      };
+    }
+  }
+}
+
 export function buildDefaultJobHandlers(): JobHandler[] {
   return [
     new DelayedTransactionJobHandler(),
     new FundingAutoDeploymentJobHandler(),
     new WorkflowExpiryJobHandler(),
+    new ProgressMonitorJobHandler(),
   ];
 }
