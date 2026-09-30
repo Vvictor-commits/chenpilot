@@ -19,6 +19,14 @@ import {
   CURRENT_WORKFLOW_SCHEMA_VERSION,
   checkSchemaCompatibility,
 } from "./workflowSchemaVersion";
+import {
+  StepInputResolutionContext,
+  StepInputResolutionError,
+  clearResolvedStepInputs,
+  collectCompletedStepResults,
+  isStepInputResolutionError,
+  resolveAndFreezeStepInputs,
+} from "./stepInputResolution";
 
 export interface DurableExecutionResult {
   executionId: string;
@@ -67,6 +75,26 @@ export class DurableExecutor {
     if (freshExecution?.status === ExecutionStatus.CANCELLED) {
       throw new ExecutionCancelledError(executionId);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Resolved-input context
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Snapshot the values a step's placeholders may reference.
+   *
+   * Rebuilt for every step (rather than once per run) so that results written
+   * by earlier steps in the same run are visible to references in a later
+   * step's payload; the map is a point-in-time copy, not a live view.
+   */
+  private buildInputResolutionContext(
+    execution: DurableExecution
+  ): StepInputResolutionContext {
+    return {
+      stepResults: collectCompletedStepResults(execution.steps ?? []),
+      context: execution.context ?? {},
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -414,7 +442,10 @@ export class DurableExecutor {
         const success = await this.executeStepWithRetries(
           step,
           execution.userId,
-          executionId
+          executionId,
+          // Rebuilt per step so results written by earlier steps in this same
+          // run are visible to references in this step's payload.
+          this.buildInputResolutionContext(execution)
         );
 
         if (success) {
@@ -500,12 +531,34 @@ export class DurableExecutor {
   private async executeStepWithRetries(
     step: DurableStep,
     userId: string,
-    executionId: string
+    executionId: string,
+    inputContext: StepInputResolutionContext
   ): Promise<boolean> {
     while (step.retryCount < step.maxRetries) {
       // Safe point: check before each attempt to avoid invoking a tool after
       // the execution has been externally cancelled.
       await this.checkCancelled(executionId);
+
+      // Freeze the resolved inputs durably *before* the side effect. On a retry
+      // or a resume this returns the snapshot written by the interrupted
+      // attempt instead of re-deriving inputs from changed state (issue #809).
+      let inputs: Record<string, unknown>;
+      try {
+        inputs = await resolveAndFreezeStepInputs(
+          step,
+          inputContext,
+          this.stepRepo
+        );
+      } catch (error) {
+        if (!isStepInputResolutionError(error)) throw error;
+        return this.failUnresolvedStepInputs(step, error);
+      }
+
+      logger.debug("Step inputs frozen", {
+        executionId,
+        stepNumber: step.stepNumber,
+        inputsHash: step.resolvedInputsHash,
+      });
 
       step.status = StepStatus.RUNNING;
       step.startedAt = new Date();
@@ -514,7 +567,7 @@ export class DurableExecutor {
       try {
         const result = await toolRegistry.executeTool(
           step.action,
-          step.payload,
+          inputs,
           userId
         );
 
@@ -553,6 +606,37 @@ export class DurableExecutor {
         }
       }
     }
+    return false;
+  }
+
+  /**
+   * Fail a step whose inputs could not be resolved and frozen.
+   *
+   * The refusal happens before any side effect, and it is deterministic — the
+   * same payload against the same context fails identically — so the step is
+   * marked FAILED after a single attempt instead of consuming the retry budget.
+   * Returning `false` lets `run()` apply the normal failure path (including
+   * compensation of already-completed steps) unchanged.
+   */
+  private async failUnresolvedStepInputs(
+    step: DurableStep,
+    error: StepInputResolutionError
+  ): Promise<false> {
+    step.status = StepStatus.FAILED;
+    step.error = `Unresolved step inputs (${error.code}): ${error.message}`;
+    await this.stepRepo.save(step);
+
+    logger.error(
+      "Refusing to execute step: resolved inputs could not be frozen",
+      {
+        stepNumber: step.stepNumber,
+        action: step.action,
+        code: error.code,
+        location: error.location,
+        error: error.message,
+      }
+    );
+
     return false;
   }
 
@@ -601,6 +685,9 @@ export class DurableExecutor {
 
     if (!step) throw new Error("Step not found");
 
+    // The frozen resolved inputs are intentionally retained: the retry replays
+    // exactly the inputs of the failed attempt, so a recovered step cannot
+    // submit different parameters (issue #809).
     step.status = StepStatus.PENDING;
     step.retryCount = 0;
     step.error = undefined;
@@ -634,6 +721,11 @@ export class DurableExecutor {
 
   /**
    * Operator repair: Update step payload and retry
+   *
+   * This is the only path allowed to invalidate a frozen input snapshot: the
+   * supplied payload replaces the template the old snapshot was derived from,
+   * so the snapshot is cleared and the next attempt freezes fresh inputs. The
+   * superseded hash is logged so the replacement is auditable (issue #809).
    */
   async repairUpdateAndRetry(
     executionId: string,
@@ -647,11 +739,21 @@ export class DurableExecutor {
 
     if (!step) throw new Error("Step not found");
 
+    const supersededInputsHash = clearResolvedStepInputs(step);
+
     step.payload = newPayload;
     step.status = StepStatus.PENDING;
     step.retryCount = 0;
     step.error = undefined;
     await this.stepRepo.save(step);
+
+    if (supersededInputsHash) {
+      logger.warn("Operator replaced step payload; frozen inputs invalidated", {
+        executionId,
+        stepNumber,
+        supersededInputsHash,
+      });
+    }
 
     return this.resumeExecution(executionId);
   }

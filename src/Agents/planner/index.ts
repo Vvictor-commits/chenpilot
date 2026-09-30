@@ -18,6 +18,22 @@ export { ExecutionStatus } from "./DurableExecution.entity";
 export { StepStatus } from "./DurableStep.entity";
 export { DependencyGraph } from "./DependencyGraph";
 export { ParallelScheduler, parallelScheduler } from "./ParallelScheduler";
+export {
+  StepInputResolutionError,
+  UnresolvedStepInputError,
+  ResolvedInputsImmutableError,
+  ResolvedInputsIntegrityError,
+  clearResolvedStepInputs,
+  collectCompletedStepResults,
+  containsUnresolvedPlaceholders,
+  hashResolvedInputs,
+  isResolvedStepInputsSnapshot,
+  isStepInputPlaceholder,
+  isStepInputResolutionError,
+  readFrozenStepInputs,
+  resolveAndFreezeStepInputs,
+  resolveStepInputs,
+} from "./stepInputResolution";
 
 export type {
   PlannerContext,
@@ -46,3 +62,12 @@ export type {
   PersistedSchedule,
   SchedulerOptions,
 } from "./ParallelScheduler";
+export type {
+  FreezeStepInputsOptions,
+  ResolvableStepLike,
+  ResolvedStepInputs,
+  StepInputReference,
+  StepInputResolutionContext,
+  StepInputResolutionErrorCode,
+  StepPersister,
+} from "./stepInputResolution";

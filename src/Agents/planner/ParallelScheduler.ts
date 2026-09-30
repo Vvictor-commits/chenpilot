@@ -33,6 +33,13 @@ import {
   RealtimeEventType,
 } from "../../Gateway/socketManager";
 import logger from "../../config/logger";
+import {
+  StepInputResolutionContext,
+  StepInputResolutionError,
+  collectCompletedStepResults,
+  isStepInputResolutionError,
+  resolveAndFreezeStepInputs,
+} from "./stepInputResolution";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -371,8 +378,30 @@ export class ParallelScheduler {
     userId: string,
     executionId: string
   ): Promise<void> {
+    // Values this step's placeholders may reference. Loaded once per step: a
+    // frozen snapshot is reused on every retry, so no re-read is needed
+    // (issue #809).
+    const inputContext = await this.buildInputResolutionContext(executionId);
+
     while (step.retryCount < step.maxRetries) {
       await this.checkCancelled(executionId);
+
+      // Freeze the resolved inputs durably *before* the side effect, so a
+      // retry or a resume replays the same inputs instead of re-deriving them.
+      let inputs: Record<string, unknown>;
+      try {
+        inputs = await resolveAndFreezeStepInputs(
+          step,
+          inputContext,
+          this.stepRepo
+        );
+      } catch (error) {
+        if (!isStepInputResolutionError(error)) throw error;
+        await this.failUnresolvedStepInputs(step, error);
+        // No retry: the failure is deterministic. Propagating lets the wave
+        // handler cancel downstream steps and compensate completed branches.
+        throw error;
+      }
 
       step.status = StepStatus.RUNNING;
       step.startedAt = new Date();
@@ -381,7 +410,7 @@ export class ParallelScheduler {
       try {
         const result = await toolRegistry.executeTool(
           step.action,
-          step.payload,
+          inputs,
           userId
         );
 
@@ -427,6 +456,55 @@ export class ParallelScheduler {
 
     throw new Error(
       `Step ${step.stepNumber} (${step.action}) failed after ${step.maxRetries} retries: ${step.error}`
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Resolved-input helpers
+  // -------------------------------------------------------------------------
+
+  /**
+   * Snapshot the values a step's placeholders may reference: the results of
+   * steps that already completed, plus the execution's `context` column.
+   */
+  private async buildInputResolutionContext(
+    executionId: string
+  ): Promise<StepInputResolutionContext> {
+    const [steps, execution] = await Promise.all([
+      this.stepRepo.find({ where: { execution: { id: executionId } } }),
+      this.executionRepo.findOne({ where: { id: executionId } }),
+    ]);
+
+    return {
+      stepResults: collectCompletedStepResults(steps),
+      context: execution?.context ?? {},
+    };
+  }
+
+  /**
+   * Persist the FAILED state of a step whose inputs could not be resolved.
+   *
+   * The refusal happens before any side effect; recording it on the step keeps
+   * the operator-visible audit trail complete before the error propagates to
+   * the wave handler.
+   */
+  private async failUnresolvedStepInputs(
+    step: DurableStep,
+    error: StepInputResolutionError
+  ): Promise<void> {
+    step.status = StepStatus.FAILED;
+    step.error = `Unresolved step inputs (${error.code}): ${error.message}`;
+    await this.stepRepo.save(step);
+
+    logger.error(
+      "Refusing to execute step: resolved inputs could not be frozen",
+      {
+        stepNumber: step.stepNumber,
+        action: step.action,
+        code: error.code,
+        location: error.location,
+        error: error.message,
+      }
     );
   }
 
