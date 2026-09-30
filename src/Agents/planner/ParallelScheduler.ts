@@ -19,13 +19,26 @@
  *    downstream dependents are cancelled.  Previously completed steps are
  *    compensated in reverse topological order via their `rollbackAction`,
  *    if provided.
+ *
+ * 5. **External dependency ownership** – steps may reference steps of *other*
+ *    durable workflows (see `EXTERNAL_WORKFLOW_DEPENDENCIES_KEY`).  Every such
+ *    reference is resolved against `SchedulerOptions.resolveExternalOwner` and
+ *    rejected before any step runs unless the referenced workflow is owned by
+ *    the same principal as the execution being scheduled.  When a plan declares
+ *    an external dependency and no resolver is configured the run fails closed.
  */
 
 import { AppDataSource } from "../../config/Datasource";
 import { DurableExecution, ExecutionStatus } from "./DurableExecution.entity";
 import { DurableStep, StepStatus } from "./DurableStep.entity";
 import { ExecutionPlan, PlanStep } from "./AgentPlanner";
-import { DependencyGraph, ExecutionWave, GraphBuildResult, ResourceKey } from "./DependencyGraph";
+import {
+  DependencyGraph,
+  ExecutionWave,
+  GraphBuildOptions,
+  GraphBuildResult,
+  ResourceKey,
+} from "./DependencyGraph";
 import { toolRegistry } from "../registry/ToolRegistry";
 import { RedisLockService } from "../../services/lock/redisLock.service";
 import {
@@ -67,6 +80,21 @@ export interface SchedulerOptions {
    * Defaults to true.
    */
   compensateOnFailure?: boolean;
+  /**
+   * Authoritative ownership lookup for external workflow references declared by
+   * plan steps (`externalWorkflowDependencies` in the step payload).
+   *
+   * It usually reads persisted `DurableExecution` rows, so it may be async; it
+   * is called once per referenced execution id before the graph is built.  The
+   * returned owner is compared with `execution.userId` (the principal that owns
+   * the workflow being scheduled).
+   *
+   * When a plan declares external dependencies and this resolver is not
+   * configured, the graph build fails closed instead of trusting the plan.
+   */
+  resolveExternalOwner?: (
+    executionId: string
+  ) => string | undefined | Promise<string | undefined>;
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +143,12 @@ export class ParallelScheduler {
     // -----------------------------------------------------------------------
     // 1. Build or reload the dependency graph
     // -----------------------------------------------------------------------
-    const graph = DependencyGraph.build(plan.steps);
+    // References to other workflows are ownership-checked before any wave is
+    // computed; plans that declare none are unaffected.
+    const graph = DependencyGraph.build(
+      plan.steps,
+      await this.buildOwnershipOptions(execution, plan, opts)
+    );
 
     // -----------------------------------------------------------------------
     // 2. Persist (or reload) the wave schedule for deterministic replay
@@ -234,6 +267,58 @@ export class ParallelScheduler {
       await this.markExecutionFailed(execution, msg);
       logger.error("ParallelScheduler unexpected error", { executionId, error: msg });
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // External workflow dependency ownership
+  // -------------------------------------------------------------------------
+
+  /**
+   * Assembles the ownership context handed to `DependencyGraph.build`.
+   *
+   * Always carries the identity of the workflow being scheduled.  When the plan
+   * declares external workflow dependencies it also carries an authoritative
+   * `executionId → ownerId` map resolved through
+   * {@link SchedulerOptions.resolveExternalOwner}.
+   *
+   * The map is deliberately omitted when no resolver is configured: the graph
+   * build then fails closed with `ownership_context_required` instead of
+   * trusting ownership claims taken from the plan itself.
+   */
+  private async buildOwnershipOptions(
+    execution: DurableExecution,
+    plan: ExecutionPlan,
+    opts: SchedulerOptions
+  ): Promise<GraphBuildOptions> {
+    const options: GraphBuildOptions = {
+      ownerId: execution.userId,
+      executionId: execution.id,
+    };
+
+    const referencedExecutionIds =
+      DependencyGraph.collectExternalDependencyExecutionIds(plan.steps);
+    if (referencedExecutionIds.length === 0) {
+      return options;
+    }
+
+    const { resolveExternalOwner } = opts;
+    if (typeof resolveExternalOwner !== "function") {
+      logger.warn(
+        "Plan declares external workflow dependencies without an owner resolver",
+        { executionId: execution.id, referencedExecutionIds }
+      );
+      return options;
+    }
+
+    const externalOwners = new Map<string, string>();
+    for (const referencedExecutionId of referencedExecutionIds) {
+      const owner = await resolveExternalOwner(referencedExecutionId);
+      if (typeof owner === "string" && owner.length > 0) {
+        externalOwners.set(referencedExecutionId, owner);
+      }
+    }
+
+    return { ...options, externalOwners };
   }
 
   // -------------------------------------------------------------------------

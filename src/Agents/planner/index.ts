@@ -16,7 +16,11 @@ export {
 export { CompensationService, compensationService, buildCompensationPlan } from "./CompensationService";
 export { ExecutionStatus } from "./DurableExecution.entity";
 export { StepStatus } from "./DurableStep.entity";
-export { DependencyGraph } from "./DependencyGraph";
+export {
+  DependencyGraph,
+  EXTERNAL_WORKFLOW_DEPENDENCIES_KEY,
+  ExternalDependencyOwnershipError,
+} from "./DependencyGraph";
 export { ParallelScheduler, parallelScheduler } from "./ParallelScheduler";
 export {
   StepInputResolutionError,
@@ -56,6 +60,9 @@ export type {
   ResourceKey,
   StepNode,
   GraphBuildResult,
+  GraphBuildOptions,
+  ExternalWorkflowDependency,
+  ExternalDependencyViolationCode,
 } from "./DependencyGraph";
 export type {
   WaveRecord,
