@@ -14,6 +14,9 @@ import {
 import { assetRevocationService } from "../../Security";
 import logger from "../../config/logger";
 import { sequenceLeaseService } from "../../services/sequence";
+import {
+  assertTrustlinesForTransfer,
+} from "../../../packages/sdk/src/trustline";
 
 interface MultiHopTradePayload extends Record<string, unknown> {
   /** "evaluate" returns the best path without executing. "execute" submits the trade. */
@@ -250,6 +253,13 @@ export class MultiHopTradeTool extends BaseTool<MultiHopTradePayload> {
       const bestPath = result.bestPath;
       const keypair = this.getKeypair(userId);
       const publicKey = keypair.publicKey();
+
+      // Preflight: every asset on the route must hold an authorized trustline
+      // on the sender's account (source, destination and intermediate hops).
+      // Fail-closed — a frozen or missing trustline blocks the transfer.
+      await assertTrustlinesForTransfer(config.stellar.horizonUrl, publicKey, [
+        ...bestPath.path,
+      ]);
 
       // Acquire a durable sequence lease to prevent sequence races across instances
       const leaseResult = await sequenceLeaseService.acquireLease(
