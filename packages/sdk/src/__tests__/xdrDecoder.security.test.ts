@@ -247,6 +247,27 @@ describe("XDR Security & Hardened Decoding Subsystem (#663)", () => {
       expect(explanation).toContain(destKeypair.publicKey());
     });
 
+    it("preserves muxed recipient ID in payment operation explanation", () => {
+      // Build a muxed account: same base key as destKeypair but with sub-ID 42
+      const muxedDest = new StellarSdk.MuxedAccount(
+        new StellarSdk.Account(destKeypair.publicKey(), "0"),
+        "42"
+      );
+      const op = StellarSdk.Operation.payment({
+        destination: muxedDest.accountId(),
+        asset: StellarSdk.Asset.native(),
+        amount: "50",
+      });
+
+      const opXdr = op.toXDR("base64");
+      const explanation = XdrDecoder.explainOperation(opXdr);
+
+      // The explanation must carry the full M-address, not just the base G-address
+      expect(explanation).toContain("Send 50 XLM to");
+      expect(explanation).toContain(muxedDest.accountId());
+      expect(explanation).not.toBe(`Send 50 XLM to ${destKeypair.publicKey()}`);
+    });
+
     it("correctly decodes and explains valid change trust operation", () => {
       const customAsset = new StellarSdk.Asset(
         "USDC",
