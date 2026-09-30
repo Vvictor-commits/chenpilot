@@ -124,6 +124,18 @@ export class MultiHopPathFinder {
       });
     }
 
+    if (policy.minTradeSize !== undefined) {
+      const sourceAmount = parseFloat(path.sourceAmount);
+      if (sourceAmount < policy.minTradeSize) {
+        violations.push({
+          field: "minTradeSize",
+          actual: sourceAmount,
+          threshold: policy.minTradeSize,
+          reason: `trade size ${sourceAmount} < protocol minimum ${policy.minTradeSize}`,
+        });
+      }
+    }
+
     if (violations.length > 0) {
       throw new RoutePolicyViolationError(
         violations.map((v) => v.reason).join("; "),

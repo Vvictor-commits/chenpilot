@@ -327,6 +327,64 @@ describe("MultiHopPathFinder", () => {
         expect(e.violations.length).toBeGreaterThan(0);
       }
     });
+
+    it("throws RoutePolicyViolationError when trade size is below protocol minimum", async () => {
+      // source_amount in makeRecord is "100.0000000"; minTradeSize of 500 should trigger
+      mockServer.call.mockResolvedValue({
+        records: [makeRecord("12.0000000")],
+      });
+
+      const policy: RoutePolicy = {
+        minEfficiency: 0,
+        maxSlippage: 1,
+        maxHops: 10,
+        minTradeSize: 500,
+      };
+
+      try {
+        await pathFinder.findOptimalPath(XLM, USDC, "100", { policy });
+        fail("Expected RoutePolicyViolationError");
+      } catch (err) {
+        expect(err).toBeInstanceOf(RoutePolicyViolationError);
+        const e = err as RoutePolicyViolationError;
+        const v = e.violations.find((v: PolicyViolation) => v.field === "minTradeSize")!;
+        expect(v).toBeDefined();
+        expect(v.actual).toBe(100);
+        expect(v.threshold).toBe(500);
+      }
+    });
+
+    it("passes when trade size meets the protocol minimum", async () => {
+      mockServer.call.mockResolvedValue({
+        records: [makeRecord("12.0000000")],
+      });
+
+      const policy: RoutePolicy = {
+        minEfficiency: 0,
+        maxSlippage: 1,
+        maxHops: 10,
+        minTradeSize: 50, // 100 >= 50, should pass
+      };
+
+      const result = await pathFinder.findOptimalPath(XLM, USDC, "100", { policy });
+      expect(result.bestPath).toBeDefined();
+    });
+
+    it("does not check minTradeSize when it is not set", async () => {
+      mockServer.call.mockResolvedValue({
+        records: [makeRecord("12.0000000")],
+      });
+
+      // policy with no minTradeSize — should pass regardless of amount
+      const policy: RoutePolicy = {
+        minEfficiency: 0,
+        maxSlippage: 1,
+        maxHops: 10,
+      };
+
+      const result = await pathFinder.findOptimalPath(XLM, USDC, "0.0000001", { policy });
+      expect(result.bestPath).toBeDefined();
+    });
   });
 
   describe("comparePaths", () => {
