@@ -402,17 +402,23 @@ export class ParallelScheduler {
     if (step.requiresApproval && !step.approvedAt) {
       // Suspend the execution for step-level approval
       step.status = StepStatus.AWAITING_APPROVAL;
+      const ttlMinutes = 60; // Default 60 minutes for step approval
+      const now = new Date();
+      step.expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000);
       await this.stepRepo.save(step);
 
       const execution = await this.executionRepo.findOne({ where: { id: executionId } });
       if (execution) {
         execution.status = ExecutionStatus.AWAITING_APPROVAL;
         execution.currentStepNumber = stepNumber;
+        if (!execution.expiresAt) {
+          execution.expiresAt = step.expiresAt;
+        }
         await this.executionRepo.save(execution);
         this.emitUpdate(RealtimeEventType.AGENT_APPROVAL_REQUIRED, execution);
       }
 
-      logger.info("Execution suspended for step approval", { executionId, stepNumber });
+      logger.info("Execution suspended for step approval", { executionId, stepNumber, expiresAt: step.expiresAt });
       throw new Error(`Step ${stepNumber} requires approval`);
     }
 

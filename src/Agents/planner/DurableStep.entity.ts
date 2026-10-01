@@ -58,6 +58,9 @@ export class DurableStep {
   @Column({ type: "uuid", nullable: true })
   approvedBy?: string;
 
+  @Column({ type: "timestamp", nullable: true })
+  expiresAt?: Date;
+
   @Column({
     type: "enum",
     enum: StepStatus,
