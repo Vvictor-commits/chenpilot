@@ -270,4 +270,21 @@ describe("MultiHopTradeTool", () => {
       expect(result.error).toMatch(/unknown operation/i);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Tool metadata — capability declaration
+  // ---------------------------------------------------------------------------
+
+  describe("tool metadata", () => {
+    it("declares riskLevel and capabilities", () => {
+      expect(tool.metadata.riskLevel).toBe("high");
+      expect(Array.isArray(tool.metadata.capabilities)).toBe(true);
+      expect(tool.metadata.capabilities).toContain("dex_trading");
+      expect(tool.metadata.capabilities).toContain("path_payment");
+    });
+
+    it("does not advertise transfer-fee asset support — Stellar path payments resolve amounts via Horizon simulation", () => {
+      expect(tool.metadata.capabilities).not.toContain("transfer_fee_asset");
+    });
+  });
 });

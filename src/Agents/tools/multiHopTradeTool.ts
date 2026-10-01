@@ -106,6 +106,10 @@ export class MultiHopTradeTool extends BaseTool<MultiHopTradePayload> {
       "Find routes from USDC to USDT with minEfficiency 0.9",
     ],
     version: "2.0.0",
+    riskLevel: "high",
+    // Stellar path payments resolve output amounts via Horizon simulation;
+    // fee-on-transfer asset accounting is not needed and not supported.
+    capabilities: ["dex_trading", "path_payment", "multi_hop"],
   };
 
   private horizonServer: StellarSdk.Horizon.Server;
