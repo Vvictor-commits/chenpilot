@@ -125,6 +125,18 @@ export class DurableExecution {
   @Column({ type: "text", nullable: true })
   cancellationReason?: string | null;
 
+  // ---------------------------------------------------------------------------
+  // Schema version for resume compatibility
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The workflow schema version at the time this execution was created.
+   * Used to prevent resuming executions created with incompatible schema versions.
+   * Nullable for backward compatibility with legacy executions.
+   */
+  @Column({ type: "varchar", nullable: true, default: "1.0.0" })
+  schemaVersion?: string;
+
   @CreateDateColumn()
   createdAt!: Date;
 
