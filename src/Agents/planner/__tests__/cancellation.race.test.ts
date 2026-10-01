@@ -640,6 +640,76 @@ describe("DurableExecutor — cancellation semantics", () => {
       // Step 2 tool was never invoked (safe-point check caught the cancellation)
       expect(toolRegistry.executeTool).toHaveBeenCalledTimes(1);
     });
+
+    it("keeps provider acceptance result while cancellation stops later steps and keeps chain finality separate", async () => {
+      const step1 = makeStep({
+        id: "step-1",
+        stepNumber: 1,
+        status: StepStatus.PENDING,
+      });
+      const step2 = makeStep({
+        id: "step-2",
+        stepNumber: 2,
+        status: StepStatus.PENDING,
+      });
+
+      const exec = makeExecution({
+        status: ExecutionStatus.RUNNING,
+        steps: [step1, step2],
+      });
+
+      const savedExecution = { ...exec };
+      let savedStep1Status: string | undefined;
+      let findOneCallCount = 0;
+
+      executionRepo.findOne.mockImplementation(async () => {
+        findOneCallCount++;
+        // Provider acceptance succeeded, then cancellation is requested before
+        // the next step can run. The subsequent safe-point check must observe
+        // the cancellation and stop before any later side effect.
+        if (findOneCallCount >= 3) {
+          return {
+            ...savedExecution,
+            status: ExecutionStatus.CANCELLED,
+            cancelledAt: new Date(),
+            cancelledBy: "user-owner",
+            cancellationReason: "user requested",
+          };
+        }
+        return { ...savedExecution };
+      });
+
+      executionRepo.save.mockImplementation(async (e: unknown) => {
+        Object.assign(savedExecution, e);
+        return e;
+      });
+      stepRepo.save.mockImplementation(async (s: unknown) => {
+        const step = s as Record<string, unknown>;
+        if (step.id === "step-1") savedStep1Status = step.status as string;
+        return s;
+      });
+
+      // Provider accepted the chain transaction, but the workflow was cancelled
+      // before later steps and reconciliation could proceed.
+      (toolRegistry.executeTool as jest.Mock).mockResolvedValueOnce({
+        status: "success",
+        data: {
+          txHash: "tx-accepted-by-provider",
+          chainResult: "accepted",
+          status: "accepted",
+        },
+      });
+
+      await executor.resumeExecution("exec-1");
+
+      expect(savedStep1Status).toBe(StepStatus.COMPLETED);
+      expect(savedExecution.status).toBe(ExecutionStatus.CANCELLED);
+      expect(savedExecution.errorMessage).toBeNull();
+      expect(toolRegistry.executeTool).toHaveBeenCalledTimes(1);
+      expect(savedExecution.steps[0].result).toMatchObject({
+        data: { chainResult: "accepted", status: "accepted" },
+      });
+    });
   });
 
   // -------------------------------------------------------------------------

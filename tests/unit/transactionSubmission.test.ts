@@ -378,6 +378,22 @@ describe("TransactionSubmissionService", () => {
       expect(resolved.lastReason).toBe("provider_unavailable");
     });
 
+    it("redacts provider rejection details before persisting the reason", async () => {
+      const record = await service.register(buildInput());
+      gateway.submitImpl = async () => ({
+        status: "rejected",
+        reason:
+          "tx_bad_auth: signer=GSECRET...; envelope=AAAAAgAAAAA=; token=abc123",
+      });
+
+      const submitted = await service.submit(record.id);
+
+      expect(submitted.state).toBe(SubmissionState.REJECTED);
+      expect(submitted.lastReason).toBe("provider_rejected");
+      expect(submitted.lastReason).not.toContain("signer=");
+      expect(submitted.lastReason).not.toContain("AAAAAgAAAAA=");
+    });
+
     it("resolves a submission left mid-flight by a dead process", async () => {
       const record = await service.register(buildInput());
       gateway.submitImpl = () => new Promise(() => undefined);
