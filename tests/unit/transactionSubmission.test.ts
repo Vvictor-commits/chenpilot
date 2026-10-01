@@ -378,6 +378,52 @@ describe("TransactionSubmissionService", () => {
       expect(resolved.lastReason).toBe("provider_unavailable");
     });
 
+    it("preserves resolution progress across a provider failover", async () => {
+      const record = await service.register(buildInput());
+      gateway.submitImpl = async () => {
+        throw new AmbiguousSubmissionError("Horizon submission timed out");
+      };
+      await service.submit(record.id);
+
+      gateway.lookupError = new ProviderUnavailableError("Horizon is down");
+      const deferred = await service.resolve(record.id);
+
+      expect(deferred.state).toBe(SubmissionState.UNKNOWN);
+      expect(deferred.lastReason).toBe("provider_unavailable");
+      expect(deferred.resolutionAttempts).toBe(1);
+      expect(deferred.nextResolutionAt).not.toBeNull();
+
+      gateway.lookupError = null;
+      gateway.ledgerTransaction = {
+        hash: TX_HASH,
+        ledger: 5150,
+        successful: true,
+        resultXdr: "AAAAAA==",
+      };
+
+      const recovered = await service.resolve(record.id);
+
+      expect(recovered.state).toBe(SubmissionState.FINALIZED);
+      expect(recovered.lastReason).toBe("found_by_hash");
+      expect(recovered.resolutionAttempts).toBeGreaterThan(1);
+    });
+
+    it("redacts provider rejection details before persisting the reason", async () => {
+      const record = await service.register(buildInput());
+      gateway.submitImpl = async () => ({
+        status: "rejected",
+        reason:
+          "tx_bad_auth: signer=GSECRET...; envelope=AAAAAgAAAAA=; token=abc123",
+      });
+
+      const submitted = await service.submit(record.id);
+
+      expect(submitted.state).toBe(SubmissionState.REJECTED);
+      expect(submitted.lastReason).toBe("provider_rejected");
+      expect(submitted.lastReason).not.toContain("signer=");
+      expect(submitted.lastReason).not.toContain("AAAAAgAAAAA=");
+    });
+
     it("resolves a submission left mid-flight by a dead process", async () => {
       const record = await service.register(buildInput());
       gateway.submitImpl = () => new Promise(() => undefined);
